@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle, Bell, Camera, Check, ChevronDown, CircleDollarSign,
+  AlertTriangle, Bell, CalendarDays, Camera, Check, ChevronDown, CircleDollarSign,
   FileCheck2, Gauge, History, Home, ImageIcon, LockKeyhole, LogOut,
   Menu, Plus, Power, RefreshCw, Search, Settings, ShieldCheck, Sparkles, UploadCloud,
   UserCog, WalletCards, X, Zap,
@@ -21,6 +21,7 @@ export function Dashboard({ data, user, signOutPath }: { data: DashboardData; us
   const [mobileMenu, setMobileMenu] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [parcelOpen, setParcelOpen] = useState(false);
+  const [periodOpen, setPeriodOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -49,8 +50,8 @@ export function Dashboard({ data, user, signOutPath }: { data: DashboardData; us
   function navigate(next: Tab) { setTab(next); setMobileMenu(false); }
 
   return (
-    <div className="app-shell">
-      <aside className={`sidebar ${mobileMenu ? "sidebar-open" : ""}`}>
+    <div className="app-shell !bg-gradient-to-br !from-slate-50 !via-emerald-50/60 !to-amber-50/70">
+      <aside className={`sidebar !bg-gradient-to-b !from-emerald-950 !via-emerald-900 !to-teal-950 ${mobileMenu ? "sidebar-open" : ""}`}>
         <div className="brand-block"><div className="brand-mark"><Zap size={20} fill="currentColor" /></div><div><strong>Luz Clara</strong><span>Rincón de Zapata</span></div><button className="mobile-close" onClick={() => setMobileMenu(false)} aria-label="Cerrar menú"><X /></button></div>
         <nav className="main-nav" aria-label="Navegación principal">
           <NavButton active={tab === "summary"} icon={<Home />} label="Resumen" onClick={() => navigate("summary")} />
@@ -65,10 +66,10 @@ export function Dashboard({ data, user, signOutPath }: { data: DashboardData; us
       </aside>
       {mobileMenu && <button className="sidebar-backdrop" aria-label="Cerrar menú" onClick={() => setMobileMenu(false)} />}
       <main className="main-area">
-        <header className="topbar"><button className="menu-button" onClick={() => setMobileMenu(true)} aria-label="Abrir menú"><Menu /></button><div className="topbar-community"><span>Comunidad</span><strong>{data.community.name}</strong></div><div className="topbar-actions"><button className="icon-button" aria-label="Notificaciones"><Bell size={19} /><span className="notification-dot" /></button><div className="user-chip"><span className="avatar">{user.displayName.slice(0, 2).toUpperCase()}</span><div><strong>{user.displayName}</strong><span>{roleLabels[data.membership.role] ?? data.membership.role}</span></div><ChevronDown size={16} /></div></div></header>
+        <header className="topbar !border-emerald-100 !bg-white/90 shadow-sm"><button className="menu-button" onClick={() => setMobileMenu(true)} aria-label="Abrir menú"><Menu /></button><div className="topbar-community"><span>Comunidad</span><strong>{data.community.name}</strong></div><div className="topbar-actions"><button className="icon-button !border-sky-100 !bg-sky-50 text-sky-700" aria-label="Notificaciones"><Bell size={19} /><span className="notification-dot" /></button><div className="user-chip"><span className="avatar !bg-gradient-to-br !from-emerald-100 !to-cyan-100">{user.displayName.slice(0, 2).toUpperCase()}</span><div><strong>{user.displayName}</strong><span>{roleLabels[data.membership.role] ?? data.membership.role}</span></div><ChevronDown size={16} /></div></div></header>
         <div className="content-wrap">
           {notice && <div className="toast-inline"><Check size={17} />{notice}<button onClick={() => setNotice(null)}><X size={15} /></button></div>}
-          {tab === "summary" && <SummaryView data={data} rows={filteredRows} search={search} setSearch={setSearch} canManage={canManage} canCalculate={canCalculate} busy={busy} onUpload={() => setUploadOpen(true)} onCalculate={recalculate} />}
+          {tab === "summary" && <SummaryView data={data} rows={filteredRows} search={search} setSearch={setSearch} canManage={canManage} canCalculate={canCalculate} busy={busy} onUpload={() => setUploadOpen(true)} onCalculate={recalculate} onEditRange={() => setPeriodOpen(true)} />}
           {tab === "readings" && <ReadingsView data={data} canManage={canManage} onUpload={() => setUploadOpen(true)} />}
           {tab === "statements" && <StatementsView data={data} />}
           {tab === "security" && <SecurityView />}
@@ -77,6 +78,7 @@ export function Dashboard({ data, user, signOutPath }: { data: DashboardData; us
       </main>
       {uploadOpen && <UploadModal data={data} onClose={() => setUploadOpen(false)} onSaved={(message) => { setUploadOpen(false); setNotice(message); router.refresh(); }} />}
       {parcelOpen && <ParcelModal data={data} onClose={() => setParcelOpen(false)} onSaved={(message) => { setParcelOpen(false); setNotice(message); router.refresh(); }} />}
+      {periodOpen && <PeriodModal data={data} onClose={() => setPeriodOpen(false)} onSaved={(message) => { setPeriodOpen(false); setNotice(message); router.refresh(); }} />}
     </div>
   );
 }
@@ -89,25 +91,31 @@ function PageHeading({ eyebrow, title, description, actions }: { eyebrow: string
   return <div className="page-heading"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{actions && <div className="heading-actions">{actions}</div>}</div>;
 }
 
-function SummaryView({ data, rows, search, setSearch, canManage, canCalculate, busy, onUpload, onCalculate }: { data: DashboardData; rows: DashboardData["rows"]; search: string; setSearch: (value: string) => void; canManage: boolean; canCalculate: boolean; busy: boolean; onUpload: () => void; onCalculate: () => void }) {
+function SummaryView({ data, rows, search, setSearch, canManage, canCalculate, busy, onUpload, onCalculate, onEditRange }: { data: DashboardData; rows: DashboardData["rows"]; search: string; setSearch: (value: string) => void; canManage: boolean; canCalculate: boolean; busy: boolean; onUpload: () => void; onCalculate: () => void; onEditRange: () => void }) {
   return <>
-    <PageHeading eyebrow="Panel de electricidad" title={`Cobro ${data.period.name}`} description={`Consumo del ${formatDate(data.period.startDate)} al ${formatDate(data.period.endDate)} · vence ${formatDate(data.period.dueDate)}`} actions={<>{canCalculate && <button className="button secondary" onClick={onCalculate} disabled={busy}><RefreshCw size={17} className={busy ? "spin" : ""} /> Recalcular</button>}{canManage && <button className="button primary" onClick={onUpload}><Camera size={17} /> Nueva lectura</button>}</>} />
+    <PageHeading eyebrow="Panel de electricidad" title={`Cobro ${data.period.name}`} description={`Consumo del ${formatDate(data.period.startDate)} al ${formatDate(data.period.endDate)} · vence ${formatDate(data.period.dueDate)}`} actions={<>{canCalculate && <button className="button secondary !border-violet-200 !bg-violet-50 text-violet-800" onClick={onEditRange}><CalendarDays size={17} /> Rango de fechas</button>}{canCalculate && <button className="button secondary !border-sky-200 !bg-sky-50 text-sky-800" onClick={onCalculate} disabled={busy}><RefreshCw size={17} className={busy ? "spin" : ""} /> Recalcular</button>}{canManage && <button className="button primary !bg-gradient-to-r !from-emerald-600 !to-teal-600" onClick={onUpload}><Camera size={17} /> Nueva lectura</button>}</>} />
     <section className="kpi-grid">
       <KpiCard icon={<Gauge />} label="Consumo medido" value={`${number.format(data.summary.measuredKwh)} kWh`} detail={`${data.summary.readingCount} lecturas registradas`} tone="emerald" />
       <KpiCard icon={<Zap />} label="Medidor general" value={`${number.format(data.period.masterKwh)} kWh`} detail={`Diferencia: ${number.format(data.summary.differenceKwh)} kWh`} tone="navy" />
       <KpiCard icon={<CircleDollarSign />} label="Total a recaudar" value={money.format(data.summary.totalToCollect)} detail={`Boleta ${data.period.invoiceNumber}`} tone="gold" />
       <KpiCard icon={<ImageIcon />} label="Evidencias" value={`${data.summary.photoCount} fotos`} detail={data.summary.photoCount ? "Archivos privados y auditados" : "Aún faltan fotografías"} tone="violet" />
     </section>
-    <div className="reconciliation-banner warning"><div className="banner-icon"><AlertTriangle /></div><div><strong>Diferencia de conciliación: {data.summary.differencePercentage.toFixed(1).replace(".", ",")}%</strong><p>El medidor general registra {number.format(data.summary.differenceKwh)} kWh más que la suma de los remarcadores. Revisa fechas, consumos comunes y medidores sin evidencia.</p></div><span>Revisión requerida</span></div>
+    <div className="reconciliation-banner warning !border-orange-200 !bg-gradient-to-r !from-amber-50 !via-orange-50 !to-rose-50"><div className="banner-icon !bg-orange-100 text-orange-700"><AlertTriangle /></div><div><strong>Diferencia de conciliación: {data.summary.differencePercentage.toFixed(1).replace(".", ",")}%</strong><p>El medidor general registra {number.format(data.summary.differenceKwh)} kWh más que la suma de los remarcadores. Revisa fechas, consumos comunes y medidores sin evidencia.</p></div><span>Revisión requerida</span></div>
     <section className="dashboard-grid">
-      <div className="panel chart-panel"><div className="panel-heading"><div><span>Distribución mensual</span><h2>Consumo por vivienda</h2></div><span className="period-pill">{data.period.name}</span></div><div className="chart-box"><ResponsiveContainer width="100%" height="100%" minWidth={0}><BarChart data={data.rows.filter((row) => row.consumptionKwh > 0)} margin={{ top: 10, right: 4, left: -24, bottom: 0 }}><CartesianGrid strokeDasharray="4 4" vertical={false} stroke="#e7e8e3" /><XAxis dataKey="parcelNumber" axisLine={false} tickLine={false} tick={{ fill: "#68706a", fontSize: 11 }} /><YAxis axisLine={false} tickLine={false} tick={{ fill: "#68706a", fontSize: 11 }} /><Tooltip cursor={{ fill: "#edf4ef" }} contentStyle={{ border: "1px solid #dfe5df", borderRadius: 12, boxShadow: "0 10px 30px rgba(28,45,37,.08)" }} formatter={(value) => [`${number.format(Number(value))} kWh`, "Consumo"]} labelFormatter={(value) => `Parcela ${value}`} /><Bar dataKey="consumptionKwh" fill="#176b4d" radius={[5, 5, 0, 0]} maxBarSize={28} /></BarChart></ResponsiveContainer></div></div>
-      <div className="panel composition-panel"><div className="panel-heading"><div><span>Composición</span><h2>Total distribuido</h2></div></div><div className="total-ring"><span>{money.format(data.period.utilityTotal + data.period.readingServiceTotal)}</span><small>base eléctrica</small></div><div className="composition-list"><CompositionRow color="#176b4d" label="Consumo energía" value={data.period.energyPool} total={data.period.utilityTotal + data.period.readingServiceTotal} /><CompositionRow color="#d49a2e" label="Variable punta" value={data.period.peakPool} total={data.period.utilityTotal + data.period.readingServiceTotal} /><CompositionRow color="#243c4a" label="Cargo compartido" value={data.period.utilityTotal + data.period.readingServiceTotal - data.period.energyPool - data.period.peakPool} total={data.period.utilityTotal + data.period.readingServiceTotal} /></div></div>
+      <div className="panel chart-panel !border-cyan-200/70 !bg-gradient-to-br !from-white !via-cyan-50/40 !to-emerald-50/70"><div className="panel-heading"><div><span>Distribución mensual</span><h2>Consumo por vivienda</h2></div><span className="period-pill !bg-cyan-100 text-cyan-800">{data.period.name}</span></div><div className="chart-box"><ResponsiveContainer width="100%" height="100%" minWidth={0}><BarChart data={data.rows.filter((row) => row.consumptionKwh > 0)} margin={{ top: 10, right: 4, left: -24, bottom: 0 }}><CartesianGrid strokeDasharray="4 4" vertical={false} stroke="#d8ebe6" /><XAxis dataKey="parcelNumber" axisLine={false} tickLine={false} tick={{ fill: "#4f6f64", fontSize: 11 }} /><YAxis axisLine={false} tickLine={false} tick={{ fill: "#4f6f64", fontSize: 11 }} /><Tooltip cursor={{ fill: "#dff5ed" }} contentStyle={{ border: "1px solid #a7d8c8", borderRadius: 12, boxShadow: "0 10px 30px rgba(28,45,37,.08)" }} formatter={(value) => [`${number.format(Number(value))} kWh`, "Consumo"]} labelFormatter={(value) => `Parcela ${value}`} /><Bar dataKey="consumptionKwh" fill="#0d9488" radius={[5, 5, 0, 0]} maxBarSize={28} /></BarChart></ResponsiveContainer></div></div>
+      <div className="panel composition-panel !border-amber-200/80 !bg-gradient-to-br !from-white !via-amber-50/50 !to-orange-50/80"><div className="panel-heading"><div><span>Composición</span><h2>Total distribuido</h2></div></div><div className="total-ring"><span>{money.format(data.period.utilityTotal + data.period.readingServiceTotal)}</span><small>base eléctrica</small></div><div className="composition-list"><CompositionRow color="#059669" label="Consumo energía" value={data.period.energyPool} total={data.period.utilityTotal + data.period.readingServiceTotal} /><CompositionRow color="#f59e0b" label="Variable punta" value={data.period.peakPool} total={data.period.utilityTotal + data.period.readingServiceTotal} /><CompositionRow color="#6366f1" label="Cargo compartido" value={data.period.utilityTotal + data.period.readingServiceTotal - data.period.energyPool - data.period.peakPool} total={data.period.utilityTotal + data.period.readingServiceTotal} /></div></div>
     </section>
-    <section className="panel table-panel"><div className="table-toolbar"><div><span>Detalle por vivienda</span><h2>Liquidaciones del período</h2></div><label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar parcela o medidor" /></label></div><StatementTable rows={rows} /></section>
+    <section className="panel table-panel !border-violet-200/60 !bg-gradient-to-br !from-white !to-violet-50/30"><div className="table-toolbar"><div><span>Detalle por vivienda</span><h2>Liquidaciones del período</h2></div><label className="search-box !border-violet-200 !bg-white/80"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar parcela o medidor" /></label></div><StatementTable rows={rows} /></section>
   </>;
 }
 
-function KpiCard({ icon, label, value, detail, tone }: { icon: React.ReactNode; label: string; value: string; detail: string; tone: string }) { return <article className="kpi-card"><span className={`kpi-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></article>; }
+const kpiTailwind: Record<string, string> = {
+  emerald: "!border-emerald-200 !bg-gradient-to-br !from-white !to-emerald-100/80 shadow-emerald-900/5",
+  navy: "!border-sky-200 !bg-gradient-to-br !from-white !to-sky-100/80 shadow-sky-900/5",
+  gold: "!border-amber-200 !bg-gradient-to-br !from-white !to-amber-100/90 shadow-amber-900/5",
+  violet: "!border-violet-200 !bg-gradient-to-br !from-white !to-violet-100/80 shadow-violet-900/5",
+};
+function KpiCard({ icon, label, value, detail, tone }: { icon: React.ReactNode; label: string; value: string; detail: string; tone: string }) { return <article className={`kpi-card ${kpiTailwind[tone] ?? ""}`}><span className={`kpi-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></article>; }
 function CompositionRow({ color, label, value, total }: { color: string; label: string; value: number; total: number }) { const percentage = (value / total) * 100; return <div className="composition-row"><div><span className="legend-dot" style={{ background: color }} /><span>{label}</span><strong>{money.format(value)}</strong></div><div className="progress-track"><span style={{ width: `${percentage}%`, background: color }} /></div></div>; }
 
 function StatementTable({ rows }: { rows: DashboardData["rows"] }) {
@@ -171,6 +179,31 @@ function AdminView({ data, onAddParcel, onNotice }: { data: DashboardData; onAdd
     </section>
     <section className="storage-card"><div className="storage-icon"><ImageIcon /></div><div><span>Almacenamiento de fotografías</span><h2>R2 privado, separado de la base de datos</h2><p>La imagen se guarda como objeto privado. D1 conserva solamente la ruta interna, tipo, tamaño, hash SHA-256 y vínculo con la lectura. No existen direcciones públicas permanentes.</p></div><span className="security-pill"><LockKeyhole size={14} /> Acceso autorizado</span></section>
   </>;
+}
+
+function PeriodModal({ data, onClose, onSaved }: { data: DashboardData; onClose: () => void; onSaved: (message: string) => void }) {
+  const [startDate, setStartDate] = useState(data.period.startDate);
+  const [endDate, setEndDate] = useState(data.period.endDate);
+  const [dueDate, setDueDate] = useState(data.period.dueDate);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const dayCount = startDate && endDate && startDate <= endDate ? Math.round((new Date(`${endDate}T12:00:00`).getTime() - new Date(`${startDate}T12:00:00`).getTime()) / 86400000) + 1 : 0;
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setError(null);
+    if (startDate > endDate) return setError("La fecha de término debe ser posterior al inicio.");
+    if (dueDate < endDate) return setError("El vencimiento no puede ser anterior al término de la medición.");
+    setSaving(true);
+    try {
+      const response = await fetch(`/api/periods/${data.period.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ startDate, endDate, dueDate }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "No se pudo guardar el rango");
+      onSaved("Rango de medición guardado y cobro recalculado.");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "No se pudo guardar el rango"); }
+    finally { setSaving(false); }
+  }
+
+  return <div className="modal-layer" role="dialog" aria-modal="true" aria-label="Rango de medición"><button className="modal-backdrop" onClick={onClose} aria-label="Cerrar" /><form className="upload-modal compact-modal !border !border-violet-200 !bg-gradient-to-br !from-white !via-violet-50/40 !to-sky-50/70" onSubmit={submit}><div className="modal-heading"><div><span className="eyebrow text-violet-700">Período del cobro</span><h2>Rango de medición</h2><p>Define las fechas que aparecerán en la liquidación de {data.period.name}.</p></div><button type="button" className="icon-button !border-violet-200 !bg-violet-50" onClick={onClose}><X /></button></div><div className="date-range-preview !border-violet-200 !bg-gradient-to-r !from-violet-100 !to-sky-100"><CalendarDays /><div><span>Período seleccionado</span><strong>{startDate ? formatDate(startDate) : "—"} → {endDate ? formatDate(endDate) : "—"}</strong><small>{dayCount ? `${dayCount} días incluidos` : "Selecciona un rango válido"}</small></div></div><div className="field-row"><label className="field"><span>Inicio de la medición</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} required /></label><label className="field"><span>Término de la medición</span><input type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} required /></label></div><label className="field"><span>Fecha de vencimiento</span><input type="date" value={dueDate} min={endDate} onChange={(event) => setDueDate(event.target.value)} required /></label><div className="privacy-note !bg-sky-50 text-sky-900"><History size={16} /><span>Al guardar, el rango queda persistido y se registra en la auditoría junto con las fechas anteriores.</span></div>{error && <div className="form-error"><AlertTriangle size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancelar</button><button className="button primary !bg-gradient-to-r !from-violet-600 !to-sky-600" disabled={saving}><CalendarDays size={16} />{saving ? "Guardando…" : "Guardar rango"}</button></div></form></div>;
 }
 
 function ParcelModal({ data, onClose, onSaved }: { data: DashboardData; onClose: () => void; onSaved: (message: string) => void }) {
