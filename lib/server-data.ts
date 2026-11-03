@@ -1,8 +1,9 @@
 import "server-only";
 
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
+  adjustments,
   auditLog,
   balances,
   billingPeriods,
@@ -10,12 +11,15 @@ import {
   communityMembers,
   meterReadings,
   meters,
+  payments,
   properties,
   propertyMembers,
   readingPhotos,
   statements,
   users,
+  utilityBills,
 } from "@/db/schema";
+import { recordAudit, verifyAuditEntry } from "@/lib/audit";
 import type { ChatGPTUser } from "@/app/chatgpt-auth";
 import { allocateLargestRemainder } from "@/lib/allocation";
 
@@ -101,6 +105,14 @@ export async function ensureBootstrap(user: ChatGPTUser) {
         createdAt: now(),
       });
     }
+    const ownedProperties = await db.select({ id: properties.id }).from(properties).where(
+      and(eq(properties.communityId, community.id), sql`lower(${properties.ownerEmail}) = ${user.email.toLowerCase()}`),
+    );
+    for (const property of ownedProperties) {
+      await db.insert(propertyMembers).values({
+        id: crypto.randomUUID(), propertyId: property.id, userId: user.userId, createdAt: now(),
+      }).onConflictDoNothing();
+    }
     return community.id;
   }
 
@@ -131,6 +143,7 @@ export async function ensureBootstrap(user: ChatGPTUser) {
     readingServiceTotal: 25000,
     energyPool: 275607,
     peakPool: 345763,
+    sharedPool: 461730,
     maintenanceFundPerProperty: 3000,
     masterKwh: 3900,
     createdAt,
@@ -239,18 +252,21 @@ export async function calculatePeriod(periodId: string, userId: string) {
   ).orderBy(asc(properties.parcelNumber));
   const propertyIds = periodProperties.map((item) => item.id);
   const periodMeters = propertyIds.length
-    ? await db.select().from(meters).where(inArray(meters.propertyId, propertyIds))
+    ? await db.select().from(meters).where(and(inArray(meters.propertyId, propertyIds), eq(meters.active, true)))
     : [];
   const meterIds = periodMeters.map((item) => item.id);
   const readings = meterIds.length
     ? await db.select().from(meterReadings).where(
-        and(eq(meterReadings.periodId, periodId), inArray(meterReadings.meterId, meterIds)),
+        and(eq(meterReadings.periodId, periodId), inArray(meterReadings.meterId, meterIds), eq(meterReadings.status, "approved")),
       )
     : [];
   const periodBalances = propertyIds.length
     ? await db.select().from(balances).where(
         and(eq(balances.periodId, periodId), inArray(balances.propertyId, propertyIds)),
       )
+    : [];
+  const periodAdjustments = propertyIds.length
+    ? await db.select().from(adjustments).where(and(eq(adjustments.applyPeriodId, periodId), eq(adjustments.status, "applied"), inArray(adjustments.propertyId, propertyIds)))
     : [];
 
   const consumptionByProperty = new Map<string, number>();
@@ -271,11 +287,20 @@ export async function calculatePeriod(periodId: string, userId: string) {
   const equalWeights = periodProperties.map((property) => ({ id: property.id, weight: 1 }));
   const energyAllocation = allocateLargestRemainder(period.energyPool, weights);
   const peakAllocation = allocateLargestRemainder(period.peakPool, weights);
-  const sharedPool = period.utilityTotal + period.readingServiceTotal - period.energyPool - period.peakPool;
+  const sharedPool = period.sharedPool;
   const sharedAllocation = allocateLargestRemainder(sharedPool, equalWeights);
   const balanceByProperty = new Map(periodBalances.map((item) => [item.propertyId, item.amount]));
+  for (const adjustment of periodAdjustments) {
+    balanceByProperty.set(adjustment.propertyId, (balanceByProperty.get(adjustment.propertyId) ?? 0) + adjustment.amount);
+  }
 
-  await db.delete(statements).where(eq(statements.periodId, periodId));
+  const existingStatements = await db.select().from(statements).where(eq(statements.periodId, periodId));
+  const existingByProperty = new Map(existingStatements.map((item) => [item.propertyId, item]));
+  const statementIds = existingStatements.map((item) => item.id);
+  const verifiedPayments = statementIds.length
+    ? await db.select().from(payments).where(and(inArray(payments.statementId, statementIds), eq(payments.status, "verified")))
+    : [];
+  const paidStatementIds = new Set(verifiedPayments.map((item) => item.statementId));
   const calculatedAt = now();
   for (const property of periodProperties) {
     const energyCharge = energyAllocation.get(property.id) ?? 0;
@@ -283,8 +308,12 @@ export async function calculatePeriod(periodId: string, userId: string) {
     const sharedCharge = sharedAllocation.get(property.id) ?? 0;
     const previousBalance = balanceByProperty.get(property.id) ?? 0;
     const total = energyCharge + peakCharge + sharedCharge + period.maintenanceFundPerProperty + previousBalance;
-    await db.insert(statements).values({
-      id: crypto.randomUUID(),
+    const existingStatement = existingByProperty.get(property.id);
+    const nextStatus = existingStatement && paidStatementIds.has(existingStatement.id)
+      ? "paid" as const
+      : period.status === "published" || period.status === "closed" ? "published" as const : "draft" as const;
+    const values = {
+      id: existingStatement?.id ?? crypto.randomUUID(),
       periodId,
       propertyId: property.id,
       consumptionKwh: consumptionByProperty.get(property.id) ?? 0,
@@ -295,18 +324,25 @@ export async function calculatePeriod(periodId: string, userId: string) {
       previousBalance,
       roundingAdjustment: 0,
       total,
-      status: period.status === "published" || period.status === "closed" ? "published" : "draft",
+      status: nextStatus,
       calculatedAt,
+    };
+    await db.insert(statements).values(values).onConflictDoUpdate({
+      target: [statements.periodId, statements.propertyId],
+      set: {
+        consumptionKwh: values.consumptionKwh, energyCharge, peakCharge, sharedCharge,
+        maintenanceFund: period.maintenanceFundPerProperty, previousBalance,
+        roundingAdjustment: 0, total, status: nextStatus, calculatedAt,
+      },
     });
   }
-  await db.insert(auditLog).values({
-    id: crypto.randomUUID(),
+  await recordAudit({
     communityId: period.communityId,
     userId,
     action: "period.calculated",
     entityType: "billing_period",
     entityId: periodId,
-    payload: JSON.stringify({ propertyCount: periodProperties.length, sharedPool }),
+    payload: { propertyCount: periodProperties.length, sharedPool },
     createdAt: calculatedAt,
   });
 }
@@ -335,8 +371,12 @@ export async function getDashboardData(userId: string) {
         and(eq(statements.periodId, period.id), inArray(statements.propertyId, propertyIds)),
       )
     : [];
+  const visibleStatementIds = visibleStatements.map((item) => item.id);
+  const visiblePayments = visibleStatementIds.length
+    ? await db.select().from(payments).where(inArray(payments.statementId, visibleStatementIds))
+    : [];
   const visibleMeters = propertyIds.length
-    ? await db.select().from(meters).where(inArray(meters.propertyId, propertyIds))
+    ? await db.select().from(meters).where(and(inArray(meters.propertyId, propertyIds), eq(meters.active, true)))
     : [];
   const meterIds = visibleMeters.map((item) => item.id);
   const visibleReadings = meterIds.length
@@ -346,10 +386,11 @@ export async function getDashboardData(userId: string) {
     : [];
   const readingIds = visibleReadings.map((item) => item.id);
   const photos = readingIds.length
-    ? await db.select().from(readingPhotos).where(inArray(readingPhotos.readingId, readingIds))
+    ? await db.select().from(readingPhotos).where(inArray(readingPhotos.readingId, readingIds)).orderBy(desc(readingPhotos.createdAt))
     : [];
 
   const statementByProperty = new Map(visibleStatements.map((item) => [item.propertyId, item]));
+  const paymentByStatement = new Map(visiblePayments.map((item) => [item.statementId, item]));
   const metersByProperty = new Map<string, typeof visibleMeters>();
   for (const meter of visibleMeters) {
     if (!meter.propertyId) continue;
@@ -357,13 +398,37 @@ export async function getDashboardData(userId: string) {
   }
   const readingByMeter = new Map(visibleReadings.map((item) => [item.meterId, item]));
   const photoByReading = new Map(photos.map((item) => [item.readingId, item]));
+  const historicalStatements = propertyIds.length
+    ? (await db.select().from(statements).where(inArray(statements.propertyId, propertyIds)).orderBy(desc(statements.calculatedAt)))
+        .filter((item) => item.periodId !== period.id)
+    : [];
+  const historyByProperty = new Map<string, number[]>();
+  for (const item of historicalStatements) {
+    const values = historyByProperty.get(item.propertyId) ?? [];
+    if (values.length < 3) historyByProperty.set(item.propertyId, [...values, item.consumptionKwh]);
+  }
+  const positiveConsumptions = visibleStatements.map((item) => item.consumptionKwh).filter((value) => value > 0).sort((a, b) => a - b);
+  const communityMedian = positiveConsumptions.length ? positiveConsumptions[Math.floor(positiveConsumptions.length / 2)] : 0;
 
   const rows = visibleProperties.map((property) => {
     const statement = statementByProperty.get(property.id);
+    const propertyMeters = metersByProperty.get(property.id) ?? [];
+    const historical = historyByProperty.get(property.id) ?? [];
+    const historicalAverage = historical.length ? historical.reduce((sum, value) => sum + value, 0) / historical.length : null;
+    let anomaly: string | null = null;
+    if (statement && historicalAverage !== null && statement.consumptionKwh > historicalAverage * 1.75 && statement.consumptionKwh - historicalAverage > 50) anomaly = `Consumo ${Math.round((statement.consumptionKwh / Math.max(1, historicalAverage) - 1) * 100)}% sobre su promedio reciente`;
+    else if (statement && historicalAverage === null && communityMedian > 0 && statement.consumptionKwh > communityMedian * 3 && statement.consumptionKwh > 100) anomaly = "Consumo muy superior a la mediana de la comunidad";
+    if (!anomaly && propertyMeters.some((meter) => { const reading = readingByMeter.get(meter.id); return reading && !photoByReading.has(reading.id); })) anomaly = "Lectura sin fotografía de respaldo";
+    if (!anomaly && statement && statement.total !== statement.energyCharge + statement.peakCharge + statement.sharedCharge + statement.maintenanceFund + statement.previousBalance + statement.roundingAdjustment) anomaly = "El total no concilia con sus componentes";
     return {
       id: property.id,
       parcelNumber: property.parcelNumber,
       ownerLabel: property.ownerLabel,
+      ownerEmail: property.ownerEmail,
+      statementId: statement?.id ?? null,
+      statementStatus: statement?.status ?? "draft",
+      payment: statement ? paymentByStatement.get(statement.id) ?? null : null,
+      anomaly,
       consumptionKwh: statement?.consumptionKwh ?? 0,
       energyCharge: statement?.energyCharge ?? 0,
       peakCharge: statement?.peakCharge ?? 0,
@@ -371,7 +436,7 @@ export async function getDashboardData(userId: string) {
       maintenanceFund: statement?.maintenanceFund ?? period.maintenanceFundPerProperty,
       previousBalance: statement?.previousBalance ?? 0,
       total: statement?.total ?? 0,
-      meters: (metersByProperty.get(property.id) ?? []).map((meter) => {
+      meters: propertyMeters.map((meter) => {
         const reading = readingByMeter.get(meter.id);
         const photo = reading ? photoByReading.get(reading.id) : null;
         return {
@@ -392,14 +457,12 @@ export async function getDashboardData(userId: string) {
   const measuredKwh = rows.reduce((sum, row) => sum + row.consumptionKwh, 0);
   const differenceKwh = period.masterKwh - measuredKwh;
   const totalToCollect = visibleStatements.reduce((sum, item) => sum + item.total, 0);
-  const allStatementTotals = await db.select({ total: sql<number>`sum(${statements.total})` }).from(statements).where(eq(statements.periodId, period.id));
-  const allReadingCount = await db.select({ count: sql<number>`count(*)` }).from(meterReadings).where(eq(meterReadings.periodId, period.id));
-  const allPhotoCount = await db.select({ count: sql<number>`count(*)` }).from(readingPhotos)
-    .innerJoin(meterReadings, eq(readingPhotos.readingId, meterReadings.id))
-    .where(eq(meterReadings.periodId, period.id));
+  const paidRows = rows.filter((row) => row.payment?.status === "verified");
+  const paidAmount = paidRows.reduce((sum, row) => sum + (row.payment?.amount ?? 0), 0);
+  const outstandingAmount = rows.reduce((sum, row) => sum + (row.payment?.status === "verified" ? Math.max(0, row.total - row.payment.amount) : Math.max(0, row.total)), 0);
 
   let admin: null | {
-    properties: Array<{ id: string; parcelNumber: string; ownerLabel: string; active: boolean; meterCount: number }>;
+    properties: Array<{ id: string; parcelNumber: string; ownerLabel: string; ownerEmail: string | null; active: boolean; meterCount: number }>;
     members: Array<{ id: string; userId: string; displayName: string; email: string; role: string }>;
   } = null;
   if (membership.role === "admin") {
@@ -423,12 +486,29 @@ export async function getDashboardData(userId: string) {
         id: property.id,
         parcelNumber: property.parcelNumber,
         ownerLabel: property.ownerLabel,
+        ownerEmail: property.ownerEmail,
         active: property.active,
         meterCount: meterCountByProperty.get(property.id) ?? 0,
       })),
       members: memberRows,
     };
   }
+  const canReviewBills = ["admin", "treasurer", "auditor"].includes(membership.role);
+  const billHistory = canReviewBills ? await db.select({
+    id: utilityBills.id, periodId: utilityBills.periodId, periodName: billingPeriods.name,
+    invoiceNumber: utilityBills.invoiceNumber, issuedAt: utilityBills.issuedAt, dueDate: utilityBills.dueDate,
+    total: utilityBills.total, consumptionKwh: utilityBills.consumptionKwh, status: utilityBills.status,
+    paidAmount: utilityBills.paidAmount, paidAt: utilityBills.paidAt, previousPaymentAmount: utilityBills.previousPaymentAmount,
+    previousPaymentAt: utilityBills.previousPaymentAt,
+  }).from(utilityBills).innerJoin(billingPeriods, eq(utilityBills.periodId, billingPeriods.id)).orderBy(desc(utilityBills.issuedAt)) : [];
+  const auditRows = canReviewBills ? await db.select({ entry: auditLog, displayName: users.displayName, email: users.email })
+    .from(auditLog).innerJoin(users, eq(auditLog.userId, users.id))
+    .where(eq(auditLog.communityId, membership.communityId)).orderBy(desc(auditLog.createdAt)).limit(100) : [];
+  const auditHistory = await Promise.all(auditRows.map(async ({ entry, displayName, email }) => ({
+    id: entry.id, action: entry.action, entityType: entry.entityType, entityId: entry.entityId,
+    payload: safeJson(entry.payload), createdAt: entry.createdAt, displayName, email,
+    integrity: entry.entryHash ? await verifyAuditEntry(entry) : null,
+  })));
 
   return {
     community: { id: community.id, name: community.name, utilityClientNumber: community.utilityClientNumber },
@@ -445,6 +525,7 @@ export async function getDashboardData(userId: string) {
       readingServiceTotal: period.readingServiceTotal,
       energyPool: period.energyPool,
       peakPool: period.peakPool,
+      sharedPool: period.sharedPool,
       maintenanceFundPerProperty: period.maintenanceFundPerProperty,
       masterKwh: period.masterKwh,
     },
@@ -452,20 +533,33 @@ export async function getDashboardData(userId: string) {
       measuredKwh,
       differenceKwh,
       differencePercentage: period.masterKwh ? (differenceKwh / period.masterKwh) * 100 : 0,
-      totalToCollect: Number(allStatementTotals[0]?.total ?? totalToCollect),
-      readingCount: Number(allReadingCount[0]?.count ?? 0),
-      photoCount: Number(allPhotoCount[0]?.count ?? 0),
+      totalToCollect,
+      readingCount: visibleReadings.length,
+      photoCount: photos.length,
+      paidCount: paidRows.length,
+      unpaidCount: Math.max(0, rows.length - paidRows.length),
+      paidAmount,
+      outstandingAmount,
+      anomalyCount: rows.filter((row) => row.anomaly).length,
     },
     rows,
     admin,
+    billHistory,
+    auditHistory,
   };
+}
+
+function safeJson(value: string): unknown {
+  try { return JSON.parse(value); } catch { return { raw: value.slice(0, 500) }; }
 }
 
 export async function canAccessProperty(userId: string, propertyId: string) {
   const membership = await getMembership(userId);
   if (!membership) return false;
-  if (["admin", "reader", "treasurer", "auditor"].includes(membership.role)) return true;
   const db = getDb();
+  const [property] = await db.select({ communityId: properties.communityId }).from(properties).where(eq(properties.id, propertyId)).limit(1);
+  if (!property || property.communityId !== membership.communityId) return false;
+  if (["admin", "reader", "treasurer", "auditor"].includes(membership.role)) return true;
   const [link] = await db.select().from(propertyMembers).where(
     and(eq(propertyMembers.userId, userId), eq(propertyMembers.propertyId, propertyId)),
   ).limit(1);

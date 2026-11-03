@@ -1,7 +1,3 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
 import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
@@ -37,6 +33,7 @@ export const properties = sqliteTable(
     communityId: text("community_id").notNull().references(() => communities.id),
     parcelNumber: text("parcel_number").notNull(),
     ownerLabel: text("owner_label").notNull(),
+    ownerEmail: text("owner_email"),
     active: integer("active", { mode: "boolean" }).notNull().default(true),
     createdAt: text("created_at").notNull(),
   },
@@ -82,6 +79,7 @@ export const billingPeriods = sqliteTable("billing_periods", {
   readingServiceTotal: integer("reading_service_total").notNull(),
   energyPool: integer("energy_pool").notNull(),
   peakPool: integer("peak_pool").notNull(),
+  sharedPool: integer("shared_pool").notNull().default(0),
   maintenanceFundPerProperty: integer("maintenance_fund_per_property").notNull(),
   masterKwh: integer("master_kwh").notNull(),
   createdAt: text("created_at").notNull(),
@@ -149,6 +147,82 @@ export const statements = sqliteTable(
   (table) => [uniqueIndex("statement_property_period_unique").on(table.propertyId, table.periodId)],
 );
 
+export const payments = sqliteTable(
+  "payments",
+  {
+    id: text("id").primaryKey(),
+    statementId: text("statement_id").notNull().references(() => statements.id),
+    amount: integer("amount").notNull(),
+    paidAt: text("paid_at").notNull(),
+    method: text("method", { enum: ["transfer", "cash", "other"] }).notNull(),
+    reference: text("reference"),
+    notes: text("notes"),
+    status: text("status", { enum: ["pending", "verified", "rejected"] }).notNull(),
+    verifiedBy: text("verified_by").references(() => users.id),
+    verifiedAt: text("verified_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [uniqueIndex("payment_statement_unique").on(table.statementId)],
+);
+
+export const utilityBills = sqliteTable(
+  "utility_bills",
+  {
+    id: text("id").primaryKey(),
+    periodId: text("period_id").notNull().references(() => billingPeriods.id),
+    invoiceNumber: text("invoice_number").notNull(),
+    objectKey: text("object_key").notNull().unique(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    sha256: text("sha256").notNull().unique(),
+    issuedAt: text("issued_at").notNull(),
+    dueDate: text("due_date").notNull(),
+    total: integer("total").notNull(),
+    consumptionKwh: integer("consumption_kwh").notNull(),
+    previousPaymentAmount: integer("previous_payment_amount"),
+    previousPaymentAt: text("previous_payment_at"),
+    status: text("status", { enum: ["pending", "paid"] }).notNull(),
+    paidAmount: integer("paid_amount"),
+    paidAt: text("paid_at"),
+    paymentReference: text("payment_reference"),
+    createdBy: text("created_by").notNull().references(() => users.id),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [uniqueIndex("utility_bill_period_unique").on(table.periodId)],
+);
+
+export const adjustments = sqliteTable("adjustments", {
+  id: text("id").primaryKey(),
+  propertyId: text("property_id").notNull().references(() => properties.id),
+  sourcePeriodId: text("source_period_id").notNull().references(() => billingPeriods.id),
+  applyPeriodId: text("apply_period_id").notNull().references(() => billingPeriods.id),
+  amount: integer("amount").notNull(),
+  reason: text("reason").notNull(),
+  status: text("status", { enum: ["applied", "void"] }).notNull(),
+  createdBy: text("created_by").notNull().references(() => users.id),
+  createdAt: text("created_at").notNull(),
+});
+
+export const emailDeliveries = sqliteTable("email_deliveries", {
+  id: text("id").primaryKey(),
+  statementId: text("statement_id").notNull().references(() => statements.id),
+  recipient: text("recipient").notNull(),
+  subject: text("subject").notNull(),
+  status: text("status", { enum: ["sent", "failed"] }).notNull(),
+  providerMessageId: text("provider_message_id"),
+  errorCode: text("error_code"),
+  sentBy: text("sent_by").notNull().references(() => users.id),
+  sentAt: text("sent_at").notNull(),
+});
+
+export const rateLimits = sqliteTable("rate_limits", {
+  key: text("key").primaryKey(),
+  count: integer("count").notNull(),
+  resetAt: integer("reset_at").notNull(),
+});
+
 export const auditLog = sqliteTable("audit_log", {
   id: text("id").primaryKey(),
   communityId: text("community_id").notNull().references(() => communities.id),
@@ -157,5 +231,7 @@ export const auditLog = sqliteTable("audit_log", {
   entityType: text("entity_type").notNull(),
   entityId: text("entity_id").notNull(),
   payload: text("payload").notNull(),
+  previousHash: text("previous_hash"),
+  entryHash: text("entry_hash"),
   createdAt: text("created_at").notNull(),
 });

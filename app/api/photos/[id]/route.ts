@@ -1,16 +1,16 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
 import { getDb } from "@/db";
 import { meterReadings, meters, readingPhotos } from "@/db/schema";
 import { canAccessProperty } from "@/lib/server-data";
+import { apiError, rateHeaders, requireApiUser } from "@/lib/api-security";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
-  const user = await getChatGPTUser();
-  if (!user) return new Response("No autenticado", { status: 401 });
+  try {
+  const { user, rate } = await requireApiUser(request, { scope: "photos.read", limit: 120, windowMs: 60_000 });
   const { id } = await context.params;
   const db = getDb();
   const [record] = await db.select({
@@ -32,10 +32,13 @@ export async function GET(
     headers: {
       "Content-Type": record.mimeType,
       "Content-Disposition": "inline; filename=lectura-medidor",
-      "Cache-Control": "private, no-store, max-age=0",
       "X-Content-Type-Options": "nosniff",
       "Content-Security-Policy": "default-src 'none'; sandbox",
       "Referrer-Policy": "no-referrer",
+      ...rateHeaders(rate),
     },
   });
+  } catch (error) {
+    return apiError(error);
+  }
 }

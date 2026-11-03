@@ -1,16 +1,16 @@
 import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
 import { getDb } from "@/db";
 import {
-  auditLog,
   billingPeriods,
   meterReadings,
   meters,
   readingPhotos,
 } from "@/db/schema";
+import { recordAudit } from "@/lib/audit";
 import { calculatePeriod, canAccessProperty, getMembership } from "@/lib/server-data";
+import { ApiError, apiError, rateHeaders, requireApiUser } from "@/lib/api-security";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -37,13 +37,17 @@ function hex(buffer: ArrayBuffer) {
 }
 
 export async function POST(request: Request) {
-  const user = await getChatGPTUser();
-  if (!user) return NextResponse.json({ error: "No autenticado" }, { status: 401 });
+  try {
+  const { user, rate } = await requireApiUser(request, { scope: "readings.create", limit: 12, windowMs: 10 * 60_000, mutation: true });
   const membership = await getMembership(user.userId);
   if (!membership || !["admin", "reader", "resident"].includes(membership.role)) {
     return NextResponse.json({ error: "Tu rol no permite ingresar lecturas" }, { status: 403 });
   }
 
+  const declaredBytes = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_FILE_BYTES + 512 * 1024) {
+    throw new ApiError("La carga supera el máximo permitido", 413);
+  }
   const form = await request.formData();
   const meterId = form.get("meterId");
   const periodId = form.get("periodId");
@@ -74,7 +78,7 @@ export async function POST(request: Request) {
   const db = getDb();
   const [meter] = await db.select().from(meters).where(eq(meters.id, meterId)).limit(1);
   const [period] = await db.select().from(billingPeriods).where(eq(billingPeriods.id, periodId)).limit(1);
-  if (!meter || !meter.propertyId || !period || meter.communityId !== period.communityId) {
+  if (!meter || !meter.active || !meter.propertyId || !period || meter.communityId !== period.communityId) {
     return NextResponse.json({ error: "Medidor o período inválido" }, { status: 404 });
   }
   if (!["open", "review"].includes(period.status)) {
@@ -82,6 +86,10 @@ export async function POST(request: Request) {
   }
   if (!(await canAccessProperty(user.userId, meter.propertyId))) {
     return NextResponse.json({ error: "No puedes ingresar lecturas para esta vivienda" }, { status: 403 });
+  }
+  const capturedDate = new Date(capturedAt).toISOString().slice(0, 10);
+  if (capturedDate < period.startDate || capturedDate > period.endDate) {
+    return NextResponse.json({ error: "La fecha de captura debe estar dentro del período de medición" }, { status: 422 });
   }
 
   const arrayBuffer = await file.arrayBuffer();
@@ -99,6 +107,9 @@ export async function POST(request: Request) {
   const [existing] = await db.select().from(meterReadings).where(
     and(eq(meterReadings.meterId, meterId), eq(meterReadings.periodId, periodId)),
   ).limit(1);
+  if (existing && membership.role === "resident" && previousValue !== existing.previousValue) {
+    return NextResponse.json({ error: "La lectura anterior solo puede ser corregida por un encargado" }, { status: 403 });
+  }
   const readingId = existing?.id ?? crypto.randomUUID();
   const photoId = crypto.randomUUID();
   const extension = detectedType === "image/jpeg" ? "jpg" : detectedType === "image/png" ? "png" : "webp";
@@ -114,10 +125,10 @@ export async function POST(request: Request) {
         previousValue,
         currentValue,
         consumptionKwh: currentValue - previousValue,
-        status: membership.role === "admin" ? "approved" : "submitted",
+        status: ["admin", "reader"].includes(membership.role) ? "approved" : "submitted",
         capturedAt: new Date(capturedAt).toISOString(),
         submittedBy: user.userId,
-        approvedBy: membership.role === "admin" ? user.userId : null,
+        approvedBy: ["admin", "reader"].includes(membership.role) ? user.userId : null,
       }).where(eq(meterReadings.id, readingId));
     } else {
       await db.insert(meterReadings).values({
@@ -127,10 +138,10 @@ export async function POST(request: Request) {
         previousValue,
         currentValue,
         consumptionKwh: currentValue - previousValue,
-        status: membership.role === "admin" ? "approved" : "submitted",
+        status: ["admin", "reader"].includes(membership.role) ? "approved" : "submitted",
         capturedAt: new Date(capturedAt).toISOString(),
         submittedBy: user.userId,
-        approvedBy: membership.role === "admin" ? user.userId : null,
+        approvedBy: ["admin", "reader"].includes(membership.role) ? user.userId : null,
         notes: null,
         createdAt: new Date().toISOString(),
       });
@@ -144,14 +155,13 @@ export async function POST(request: Request) {
       sha256: digest,
       createdAt: new Date().toISOString(),
     });
-    await db.insert(auditLog).values({
-      id: crypto.randomUUID(),
+    await recordAudit({
       communityId: period.communityId,
       userId: user.userId,
       action: "reading.photo_uploaded",
       entityType: "meter_reading",
       entityId: readingId,
-      payload: JSON.stringify({ meterId, periodId, consumptionKwh: currentValue - previousValue, sha256: digest }),
+      payload: { previous: existing ? { previousValue: existing.previousValue, currentValue: existing.currentValue, consumptionKwh: existing.consumptionKwh } : null, next: { meterId, periodId, previousValue, currentValue, consumptionKwh: currentValue - previousValue, sha256: digest } },
       createdAt: new Date().toISOString(),
     });
     await calculatePeriod(periodId, user.userId);
@@ -160,5 +170,8 @@ export async function POST(request: Request) {
     throw error;
   }
 
-  return NextResponse.json({ ok: true, readingId, photoId });
+  return NextResponse.json({ ok: true, readingId, photoId }, { headers: rateHeaders(rate) });
+  } catch (error) {
+    return apiError(error);
+  }
 }

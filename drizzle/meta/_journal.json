@@ -8,6 +8,27 @@
       "when": 1793635705654,
       "tag": "0000_early_redwing",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793644053399,
+      "tag": "0001_fair_the_twelve",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793644435303,
+      "tag": "0002_famous_catseye",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793644699968,
+      "tag": "0003_funny_viper",
+      "breakpoints": true
     }
   ]
 }
